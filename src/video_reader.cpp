@@ -1,5 +1,6 @@
 #include "video_reader.hpp"
 
+
 // av_err2str returns a temporary array. This doesn't work in gcc.
 // This function can be used as a replacement for av_err2str.
 static const char* av_make_error(int errnum) {
@@ -9,6 +10,8 @@ static const char* av_make_error(int errnum) {
 }
 
 bool video_reader_open(VideoReaderState* state, const char* filename) {
+
+    avdevice_register_all();
 
     // Unpack members of state
     auto& width = state->width;
@@ -27,7 +30,22 @@ bool video_reader_open(VideoReaderState* state, const char* filename) {
         return false;
     }
 
-    if (avformat_open_input(&av_format_ctx, filename, NULL, NULL) != 0) {
+    AVInputFormat* av_input_format = NULL;
+    do {
+        av_input_format = av_input_video_device_next(av_input_format);
+    } while (av_input_format != NULL && strcmp(av_input_format->name, "avfoundation") != 0);
+
+    if (!av_input_format) {
+        printf("Couldn't find avfoundation");
+        return false;
+    }
+
+    AVDictionary* options = NULL;
+    av_dict_set(&options, "framerate", "25", 0);
+    av_dict_set(&options, "video_size", "1280x720", 0);
+    av_dict_set(&options, "pix_fmt", "bgr0", 0);
+
+    if (avformat_open_input(&av_format_ctx, "default:none", av_input_format, &options) != 0) {
         printf("Couldn't open video file\n");
         return false;
     }
