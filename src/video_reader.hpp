@@ -23,9 +23,8 @@ struct VideoReaderState {
     SwsContext* sws_scaler_ctx;
 };
 
-bool video_reader_open(VideoReaderState* state, const char* filename);
+bool video_reader_open(VideoReaderState* state);
 bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts);
-bool video_reader_seek_frame(VideoReaderState* state, int64_t ts);
 void video_reader_close(VideoReaderState* state);
 
 #endif

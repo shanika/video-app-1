@@ -17,7 +17,7 @@ int main(int argc, const char** argv) {
     }
 
     VideoReaderState vr_state;
-    if (!video_reader_open(&vr_state, "/Users/shanikawijerathna/Downloads/hoppers_rosh.mp4")) {
+    if (!video_reader_open(&vr_state)) {
         printf("Couldn't open video file\n");
         return 1;
     }
