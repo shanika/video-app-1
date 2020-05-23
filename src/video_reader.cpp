@@ -21,7 +21,13 @@ bool video_reader_open(VideoReaderState* state) {
     auto& av_codec_ctx = state->av_codec_ctx;
     auto& video_stream_index = state->video_stream_index;
     auto& av_frame = state->av_frame;
+    auto& av_fltr_frame = state->av_fltr_frame;
     auto& av_packet = state->av_packet;
+
+    auto& filter_graph = state->filter_graph;
+    auto& buffersrc_ctx = state->buffersrc_ctx;
+    auto& buffersink_ctx = state->buffersink_ctx;
+
 
     // Open the file using libavformat
     av_format_ctx = avformat_alloc_context();
@@ -30,6 +36,7 @@ bool video_reader_open(VideoReaderState* state) {
         return false;
     }
 
+    // Get Cam device context ---------------------------------------------------------------------
     AVInputFormat* av_input_format = NULL;
     do {
         av_input_format = av_input_video_device_next(av_input_format);
@@ -45,7 +52,7 @@ bool video_reader_open(VideoReaderState* state) {
         return false;
     }
 
-    // Find the first valid video stream inside the file
+    // Find the first valid video stream inside the file ------------------------------------------
     video_stream_index = -1;
     AVCodecParameters* av_codec_params;
     AVCodec* av_codec;
@@ -68,7 +75,7 @@ bool video_reader_open(VideoReaderState* state) {
         return false;
     }
 
-    // Set up a codec context for the decoder
+    // Set up a codec context for the decoder -------------------------------------
     av_codec_ctx = avcodec_alloc_context3(av_codec);
     if (!av_codec_ctx) {
         printf("Couldn't create AVCodecContext\n");
@@ -83,16 +90,85 @@ bool video_reader_open(VideoReaderState* state) {
         return false;
     }
 
+    // Now decoder is ready let's allocate memory for a frame and a packet------------------------------------
+
     av_frame = av_frame_alloc();
-    if (!av_frame) {
+    av_fltr_frame = av_frame_alloc();
+
+    if (!av_frame || !av_fltr_frame) {
         printf("Couldn't allocate AVFrame\n");
         return false;
     }
+
     av_packet = av_packet_alloc();
     if (!av_packet) {
         printf("Couldn't allocate AVPacket\n");
         return false;
     }
+
+    int response = 0;
+
+    AVFilterInOut *outputs = avfilter_inout_alloc();
+    AVFilterInOut *inputs  = avfilter_inout_alloc();
+
+    const AVFilter *buffersrc  = avfilter_get_by_name("buffer");
+    const AVFilter *buffersink = avfilter_get_by_name("buffersink");
+
+    enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_UYVY422, AV_PIX_FMT_NONE };
+
+    filter_graph = avfilter_graph_alloc();
+    if (!outputs || !inputs || !filter_graph) {
+        printf("Couldn't allocate FilterGraph\n");
+        return false;
+    }
+
+    /* buffer video source: the decoded frames from the decoder will be inserted here. */
+    char args[512];
+    snprintf(args, sizeof(args),
+             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+             av_codec_ctx->width, av_codec_ctx->height, av_codec_ctx->pix_fmt,
+             time_base.num, time_base.den,
+             av_codec_ctx->sample_aspect_ratio.num, av_codec_ctx->sample_aspect_ratio.den);
+
+    if ((response = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, NULL, filter_graph)) < 0) {
+        printf("Can not create buffer source\n");
+        return false;
+    }
+
+    if ((response = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", NULL, NULL, filter_graph)) < 0) {
+        printf("Cannot create buffer sink\n");
+        return false;
+    }
+
+    if ((response = av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN)) < 0) {
+        printf("Cannot set output pixel format\n");
+        return false;
+    }
+
+    outputs->name       = av_strdup("in");
+    outputs->filter_ctx = buffersrc_ctx;
+    outputs->pad_idx    = 0;
+    outputs->next       = NULL;
+
+    inputs->name       = av_strdup("out");
+    inputs->filter_ctx = buffersink_ctx;
+    inputs->pad_idx    = 0;
+    inputs->next       = NULL;
+
+    const char *filter_descr = "drawbox=y=ih-68:color=black@0.4:width=iw:height=48:t=fill, drawtext=fontfile=OpenSans-Regular.ttf:text='Shanika Wijerathna | Software Developer | +642102482571 | Shanika.Wijerathna@nzta.govt.nz':fontcolor=white:fontsize=24:x=20:y=(h-53)";
+
+    if ((response = avfilter_graph_parse_ptr(filter_graph, filter_descr, &inputs, &outputs, NULL)) < 0) {
+        printf("Cannot parse ptr\n");
+        return false;
+    }
+
+    if ((response = avfilter_graph_config(filter_graph, NULL)) < 0) {
+        printf("Cannot do filter graph config\n");
+        return false;
+    }
+
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
 
     return true;
 }
@@ -106,8 +182,13 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
     auto& av_codec_ctx = state->av_codec_ctx;
     auto& video_stream_index = state->video_stream_index;
     auto& av_frame = state->av_frame;
+    auto& av_fltr_frame = state->av_fltr_frame;
     auto& av_packet = state->av_packet;
     auto& sws_scaler_ctx = state->sws_scaler_ctx;
+
+    auto& filter_graph = state->filter_graph;
+    auto& buffersrc_ctx = state->buffersrc_ctx;
+    auto& buffersink_ctx = state->buffersink_ctx;
 
     // Decode one frame
     int response;
@@ -132,15 +213,30 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
             return false;
         }
 
+        av_frame->pts = av_frame->best_effort_timestamp;
         av_packet_unref(av_packet);
         break;
     }
 
-    *pts = av_frame->pts;
+    if (av_buffersrc_add_frame_flags(buffersrc_ctx, av_frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
+        printf("Error while feeding the filtergraph\n");
+    }
+
+    response = av_buffersink_get_frame(buffersink_ctx, av_fltr_frame);
+    if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
+        printf("Error while pulling filtered frames, end of file\n");
+        return false;
+    }
+    if (response < 0) {
+        printf("Error while pulling filtered frames\n");
+        return false;
+    }
+
+    *pts = av_fltr_frame->pts;
     
     // Set up sws scaler
     if (!sws_scaler_ctx) {
-        sws_scaler_ctx = sws_getContext(width, height, av_codec_ctx->pix_fmt,
+        sws_scaler_ctx = sws_getContext(width, height, AV_PIX_FMT_UYVY422,
                                         width, height, AV_PIX_FMT_RGB0,
                                         SWS_BILINEAR, NULL, NULL, NULL);
     }
@@ -151,7 +247,8 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
 
     uint8_t* dest[4] = { frame_buffer, NULL, NULL, NULL };
     int dest_linesize[4] = { width * 4, 0, 0, 0 };
-    sws_scale(sws_scaler_ctx, av_frame->data, av_frame->linesize, 0, av_frame->height, dest, dest_linesize);
+
+    sws_scale(sws_scaler_ctx, av_fltr_frame->data, av_fltr_frame->linesize, 0, av_fltr_frame->height, dest, dest_linesize);
 
     return true;
 }
